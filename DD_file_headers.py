@@ -1,7 +1,22 @@
-#!/home/ofg/miniconda3/bin/python3.7
-#!/home/webmgr/miniconda3/bin/python3.7
+#!/home/ofg/miniconda3/bin/python3.8
+'''
+These were the old interperters for ui1b and testing
+/home/ofg/miniconda3/bin/python3.7 # ui1b
+/home/webmgr/miniconda3/bin/python3.7 # ui1b testing
+'''
 
 # ui1b armweb-stage armweb-dev
+''' data discovery netcdf file header dumping script
+This script is being copied from ui1b to armui-prod on ornl.gov
+It uses webmgr to run with the following entry in the crontab
+0 0 * * * /home/webmgr/DD_cdf_headers/./DD_file_headers.py
+
+The gitlab repo on code-int.ornl.gov does not include
+the two config files which are necessary for running this script.
+Michael Giansiracusa has the config files because they include
+login information for databases.
+The two config files are: config_dev.ini and config_prod.ini
+'''
 import os
 import sys
 import json
