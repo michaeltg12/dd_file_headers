@@ -1,16 +1,7 @@
-#!/data/home/giansiracusa/miniconda3/bin/python3
-
-"""
-This code is a proof of concept and should not be put into production as is.
-It could use some oop and better logging.
-It needs better argument parsing and proper debug logging.
-The hard coded paths should be changed to user defined or relative. The problem with this is that
-a huge amount of space is needed to download the lasso files.
-"""
+#!/home/ofg/miniconda3/bin/python3.7
+#!/home/webmgr/miniconda3/bin/python3.7
 
 # ui1b armweb-stage armweb-dev
-# This will have to be run on one of the machines that has /data/reproc mounted so that is
-# has the space to temporarily download the Lasso tar bundles which are 25-50 Gb.
 import os
 import sys
 import json
@@ -23,7 +14,6 @@ import configparser
 import datetime as dt
 from loguru import logger
 from os.path import expanduser
-from logging.handlers import RotatingFileHandler
 
 
 script_description = """
@@ -36,16 +26,6 @@ deleted."""
 
 example='TODO' #TODO
 
-# output_path = '/var/www/html/headers' # this was when it could run on ui1b
-tmp_dir = "/work/netcdf_headers/"
-log_dir = "/var/log/dd_file_headers"
-header_dir = "/var/www/vhosts/archive.arm.gov/headers"
-download_loc = os.path.join(tmp_dir, 'download/')
-extraction_loc = os.path.join(tmp_dir, 'extraction/')
-download_list = os.path.join(tmp_dir, 'download_list.{}.txt'.format(dt.datetime.now().strftime('%Y%m%d_%H%M%S')))
-adrsws_path = '/home/ofg/DD_cdf_headers/bin/./adrsws.sh'
-userid = 'giansiracusam1'
-
 
 def parse_arguments():
     arg_parser = argparse.ArgumentParser(description=script_description, epilog=example,
@@ -53,50 +33,44 @@ def parse_arguments():
     arg_parser.add_argument("-T", "--test", dest='config', action="store_const",
                             default='config_prod.ini', const='config_dev.ini',
                             help="Use testing configuration.")
-    # arg_parser.add_argument("-D", "--debug", action="store_const",
-    #                         default=logger.setLevel('INFO'), const=logger.setLevel('DEBUG'),
-    #                         help="Set console logging.")
     return arg_parser.parse_args()
 
 
 def parse_config(config_file):
     try:
+        config_path = os.path.join(expanduser("~"), 'DD_cdf_headers', config_file)
         config = configparser.ConfigParser()
-        config.read_file(open(config_file))
-        #os.path.join(tmp_dir, 'download_list.{}.txt'.format(dt.datetime.now().strftime('%Y%m%d_%H%M%S')))
+        config.read_file(open(config_path))
         return config
     except FileNotFoundError:
-        logger.critical('Could not find configuration file: {}'.format(config_file))
+        logger.critical('Could not find configuration file: {}'.format(config_path))
         exit(1)
 
 
-def setup_logging(args):
+def setup_logging(config):
     logger.remove()
-    if not args.test:
-        log_dir = defaults['logging']['log_dir']
-    else:
-        log_dir = defaults['logging']['dev_log_dir']
-    os.makedirs(log_dir, exist_ok=True)
-    log_file = os.path.join(log_dir, 'ingest_log_parser.log')
+    os.makedirs(config["logging"]["log_dir"], exist_ok=True)
+    log_file = os.path.join(config["logging"]["log_dir"], 'dd_file_headers.log')
     logger.add(log_file, rotation='50MB', retention='1 month')
-    if args.debug:
-        logger.add(sys.stdout, colorize=True, level="DEBUG")
-    else:
-        logger.add(sys.stdout, colorize=True, level="INFO")
+    logger.add(sys.stdout, colorize=True, level=config["logging"]["level"])
 
 
-def get_headers_db():
-    backup_download_list()
-    results = db_query()
+def get_headers_db(config):
+    create_starting_directories(config)
+    download_list = os.path.join(expanduser("~"), "DD_cdf_headers", 'download_list',
+                                 'download_list.{}.txt'.format(
+        dt.datetime.now().strftime('%Y%m%d_%H%M%S')))
+    backup_download_list(download_list)
+    results = db_query(config)
     for result in results:
         fname, site, ds, file_date = parse_result(result)
 
         archive_file_path = build_archive_path(fname, site, ds)
-        header_path = build_header_path(ds)
+        header_path = build_header_path(config, ds)
 
         skip_list = ['.png', '.mpg', '.raw', '.jpg', '.tsv.tar',
                      '.pdf.tar', '.txt.tar', '.asc.tar', '.00.']
-        if any([x for x in skip_list if x in fname]): # files that won't have cdf files
+        if any([x for x in skip_list if x in fname]): # files that won't have cdf headers
             logger.warning('Skipping: {0}'.format(fname))
             continue
         elif os.path.exists(archive_file_path): # dump header from /data/archive
@@ -109,60 +83,39 @@ def get_headers_db():
                 dlist.write('{}\n'.format(fname))
             continue
     # download file from hpss
-    if False: # basic way of not doing this very long process
+    if config["hpss"]["stage"] == 'True':
+        # basic way of not doing this very long process
         logger.info('Downloading from hpss...')
-        stage_from_hpss(adrsws_path, userid, download_loc)
-        tar_paths = find_tars()
+        stage_from_hpss(config, download_list)
+        tar_paths = find_tars(config)
         for tar_path in tar_paths:
-            extract_tar(tar_path)
+            extract_tar(config, tar_path)
             remove_tar(tar_path)
-            netcdf_paths = find_netcdf()
+            netcdf_paths = find_netcdf(config)
             header_path = build_tar_header(tar_path)
             dump_multi_netcdf(netcdf_paths, header_path)
-            clean_extraction()
-    copy_files_2_ddprod()
-    clean_headers()
 
 
-def setup_logging(loglevel):
-    if not os.path.exists(log_dir):
-        os.mkdir(log_dir)
-    global logger
-    logger = logging.getLogger('DD_header_processing')  # Name the logger
-    formatter = logging.Formatter(
-        '%(levelname)s (%(funcName)s %(lineno)s) : %(message)s')  # Format prints
-
-    handler = logging.StreamHandler()  # Handler to print to console
-    handler.setFormatter(formatter)  # Set the console logger format
-    logger.addHandler(handler)  # Attach console handler to the logger
-
-    time_fmt = dt.datetime.now().strftime('%Y%m%d_%H%M%S')
-    log_file = os.path.join(log_dir, 'dd_headers.{}.log'.format(time_fmt))
-    file_handler = RotatingFileHandler(log_file, mode='a')
-    file_handler.setFormatter(formatter)
-    file_handler.setLevel(logging.DEBUG)
-    logger.addHandler(file_handler)  # Attach file handler to logger
-
-    logger.setLevel(loglevel)  # Set logger level
+def create_starting_directories(config):
+    os.makedirs(config["path"]["header_dir"], exist_ok=True)
+    os.makedirs(config["path"]["download_loc"], exist_ok=True)
+    os.makedirs(config["path"]["extraction_loc"], exist_ok=True)
 
 
-def backup_download_list():
+def backup_download_list(download_list):
     if os.path.exists(download_list):
         new_name = "{}.old".format(download_list)
         os.rename(download_list, new_name)
 
 
-def db_query():
-    # get password from users .pgpass file
-    user = 'utilities_select_only'
-    passwd = parse_pgpass(user)
+def db_query(config):
     # build connection info dictionary
     connection_info = {
-        "application_name" : 'data_descovery_header_dump',
-        "host" : 'armdb-foo.ornl.gov',
-        "dbname" : 'arm_all',
-        "user" : user,
-        "password" : passwd
+        "application_name" : config['db_conn']["application_name"],
+        "host" : config['db_conn']["host"],
+        "dbname" : config['db_conn']["dbname"],
+        "user" : config['db_conn']["user"],
+        "password" : config['db_conn']["password"]
     }
     # connect using dictionary expansion
     with psycopg2.connect(**connection_info) as conn:
@@ -181,14 +134,6 @@ def db_query():
         return results
 
 
-def parse_pgpass(user):
-    with open(os.path.join(expanduser('~'), '.pgpass'), 'r') as pgpass:
-        for line in pgpass.readlines():
-            if user in line:
-                return line.split(":")[-1].strip()
-    raise ValueError("User {} password not defined in .pgpass file.".format(user))
-
-
 def parse_result(result):
     fname = result[0]
     site = fname[:3]
@@ -201,8 +146,8 @@ def build_archive_path(fname, site, ds):
     return '/data/archive/{}/{}/{}'.format(site, ds, fname)
 
 
-def build_header_path(ds):
-    return os.path.join(header_dir, '{0}.header.txt'.format(ds))
+def build_header_path(config, ds):
+    return os.path.join(config["path"]["header_dir"], '{0}.header.txt'.format(ds))
 
 
 def dump_archive_header(file_path, header_path):
@@ -211,7 +156,7 @@ def dump_archive_header(file_path, header_path):
     os.system('ncdump -h {0} > {1}'.format(file_path, header_path))
 
 
-def stage_from_hpss(adrsws_path, userid, download_loc):
+def stage_from_hpss(config, download_list):
     # helper method for printing subprocess output
     def get_process_output(process):
         while True:
@@ -226,12 +171,17 @@ def stage_from_hpss(adrsws_path, userid, download_loc):
             if output:
                 output = output.strip().replace('\n', '').replace('\r', '')
                 logger.info(output)
-    cmd = [adrsws_path, '-u', userid, '-g', download_loc, download_list]
+    cmd = [config["adrsws"]["adrsws_path"],
+           '-u', config["adrsws"]["userid"],
+           '-g', config["path"]["download_loc"],
+           download_list]
+    logger.info('\nrunning command: {}\n'.format(' '.join(cmd)))
     logger.info('... This may take a while ...')
-    logger.debug('\n{}\n'.format(' '.join(cmd)))
     logger.info('The following output is from adrsws.')
     process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    return get_process_output(process)
+    proc_out = get_process_output(process)
+    logger.info('Done with adrsws log.')
+    return proc_out
 
 
 def parse_dates(file_date):
@@ -241,38 +191,38 @@ def parse_dates(file_date):
     return start, end
 
 
-def find_tars():
+def find_tars(config):
     tar_paths = []
-    for path, dirs, files in os.walk(download_loc):
+    for path, dirs, files in os.walk(config["path"]["download_loc"]):
         for f in files:
             if '.tar' in f:
                 tar_paths.append(os.path.join(path,f))
     return tar_paths
 
 
-def extract_tar(tar_path):
+def extract_tar(config, tar_path):
     logger.info('Extracting: {}'.format(tar_path))
-    if not os.path.exists(extraction_loc):
-        os.mkdir(extraction_loc)
+    if not os.path.exists(config["path"]["extraction_loc"]):
+        os.mkdir(config["path"]["extraction_loc"])
     tar_file = tarfile.open(tar_path)
-    tar_file.extractall(path=extraction_loc)
+    tar_file.extractall(path=config["path"]["extraction_loc"])
 
 
 def remove_tar(tar_path):
     os.remove(tar_path)
 
 
-def build_tar_header(tar_path):
+def build_tar_header(config, tar_path):
     base_name = os.path.basename(tar_path)
     datastream = '.'.join(base_name.split('.')[:2])
-    return os.path.join(header_dir, '{0}.header.txt'.format(datastream))
+    return os.path.join(config["path"]["header_dir"], '{0}.header.txt'.format(datastream))
 
 
-def find_netcdf():
+def find_netcdf(config):
     logger.info('Looking for netcdf files.')
     netcdf_paths = []
     netcdf_ext = ['.nc', '.cdf']
-    for path, dirs, files in os.walk(extraction_loc):
+    for path, dirs, files in os.walk(config["path"]["extraction_loc"]):
         for f in files:
             if any([True for x in netcdf_ext if f.endswith(x)]):
                 netcdf_paths.append(os.path.join(path, f))
@@ -294,50 +244,38 @@ def dump_multi_netcdf(netcdf_paths, header_path):
         os.system(line_break)
 
 
-def copy_files_2_ddprod():
-    logger.info('Transfering files to Data Discovery Production Server.')
-    header_files = os.path.join(header_dir, '*.header.txt')
-    logger.debug('header files for transfer: {}'.format(header_files))
-    destination = 'ofg@ui1b.ornl.gov:/var/www/vhosts/archive.arm.gov/headers/'
-    cmd = ["scp", header_files, destination]
-    logger.debug('Running command: {}'.format(' '.join(cmd[:])))
-    os.system(' '.join(cmd[:]))
-
-
-def clean_extraction():
-    logger.info('Cleaning up downloads in: {}'.format(extraction_loc))
-    shutil.rmtree(extraction_loc, ignore_errors=True)
+def clean_extraction(config):
+    logger.info('Cleaning up downloads in: {}'.format(config["path"]["extraction_loc"]))
+    shutil.rmtree(config["path"]["extraction_loc"], ignore_errors=True)
     logger.debug('Recreating extraction loc.')
-    os.mkdir(extraction_loc)
+    os.mkdir(config["path"]["extraction_loc"])
 
 
-def clean_downloads():
-    logger.info('Cleaning up downloads in: {}'.format(download_loc))
-    shutil.rmtree(download_loc, ignore_errors=True)
+def clean_downloads(config):
+    logger.info('Cleaning up downloads in: {}'.format(config["path"]["download_loc"]))
+    shutil.rmtree(config["path"]["download_loc"], ignore_errors=True)
     logger.debug('Recreating download loc.')
-    os.mkdir(download_loc)
+    os.mkdir(config["path"]["download_loc"])
 
 
-def clean_headers():
-    logger.info('Cleaning up headers in: {}'.format(header_dir))
-    shutil.rmtree(header_dir, ignore_errors=True)
+def clean_headers(config):
+    logger.info('Cleaning up headers in: {}'.format(config["path"]["header_dir"]))
+    shutil.rmtree(config["path"]["header_dir"], ignore_errors=True)
     logger.debug('Recreating header loc.')
-    os.mkdir(header_dir)
+    os.mkdir(config["path"]["header_dir"])
 
 
 if __name__ == "__main__":
     args = parse_arguments()
-    print(args)
     config = parse_config(args.config)
-    print(config.get('path', 'header_dir'))
-
-    exit()
     try:
-        setup_logging(log_level)
-        get_headers_db()
+        setup_logging(config)
+        get_headers_db(config)
     except Exception as e:
+        print('exception: {}'.format(e))
         logger.warning('Exception raised: {}'.format(e))
     finally:
-        clean_extraction()
-        clean_downloads()
+        clean_extraction(config)
+        clean_downloads(config)
         logger.info('Done')
+        print('Done')
